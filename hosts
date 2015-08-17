@@ -1,0 +1,2 @@
+[openvpn]
+52.18.167.161 ansible_ssh_user=ubuntu

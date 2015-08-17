@@ -1,0 +1,13 @@
+#{{ ansible_managed }}
+# Configuration file for dnsmasq.
+
+# Never forward plain names (without a dot or domain part)
+domain-needed
+
+# Never forward addresses in the non-routed address spaces.
+bogus-priv
+
+# If you want dnsmasq to listen for DHCP and DNS requests only on
+# specified address (remember to include 127.0.0.1 if you use this.)
+listen-address=127.0.0.1,10.8.0.1
+bind-interfaces
