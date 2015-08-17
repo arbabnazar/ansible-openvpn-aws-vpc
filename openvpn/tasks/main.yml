@@ -1,0 +1,163 @@
+---
+ - name: Install the OpenVPN 
+   apt: pkg={{ item }} state=installed update_cache=true 
+   with_items:
+     - openvpn
+     - iptables-persistent
+     - udev
+     - dnsmasq
+ 
+ - name: Set ip forwarding in the sysctl file and reload if necessary
+   sysctl: name="net.ipv4.ip_forward" value=1 sysctl_set=yes state=present reload=yes
+
+ - name: Enable IPv4 traffic forwarding - (/proc/sys/net/ipv4/ip_forward)
+   command: echo 1 > /proc/sys/net/ipv4/ip_forward
+ 
+ - name: Generate the RSA keys
+   command: openssl genrsa -out {{ item }}.key {{ openvpn_key_size }} creates={{ item }}.key
+            chdir={{ openvpn_path }}
+   with_items:
+     - ca
+     - server
+
+ - name: Create directories for clients
+   file: path={{ openvpn_path}}/{{ item }} state=directory
+   with_items: 
+     openvpn_clients
+
+ - name: Generate RSA keys for the Clients
+   command: openssl genrsa -out {{ item }}.key {{ openvpn_key_size }} creates={{ item }}.key 
+            chdir={{ openvpn_path }}/{{ item }}
+   with_items:
+     openvpn_clients
+
+ - name: Set the proper permissions on all RSA keys
+   file: path={{ openvpn_path }} owner=root group=root mode=600 state=directory recurse=yes
+ 
+ - name: Generate CA certificate
+   command: openssl req -nodes -batch -new -x509 -key {{ openvpn_ca }}.key -out {{ openvpn_ca }}.crt
+            -days {{ openvpn_days_valid }} -subj "{{ openssl_request_subject }}/CN=ca-certificate"
+            creates={{ openvpn_ca }}.crt
+
+ - name: Generate OpenSSL configuration that will be used for the Server certificate req and ca commands
+   template: src=openssl-server-certificate.cnf.j2 dest={{ openvpn_path }}/openssl-server-certificate.cnf
+
+ - name: Check that the "index.txt" file exist
+   stat: path={{ openvpn_path }}/index.txt
+   register: index_exist
+
+ - name: Create blank database file that will be used when generating the Server certificate
+   file: path={{ openvpn_path }}/index.txt state=touch
+   when: index_exist.stat.exists == False
+
+ - name: Check that the "serial" file exist
+   stat: path={{ openvpn_path }}/serial
+   register: stat_result
+
+ - name: Copy/Create the serial file that will be used when generating the Server certificate
+   copy: content="01" dest={{ openvpn_path }}/serial
+   when: stat_result.stat.exists == False
+
+ - name: Generate the CSR for the Server
+   command: openssl req -batch -extensions server -new -key server.key -out server.csr -config {{ openvpn_path }}/openssl-server-certificate.cnf creates=server.csr
+            chdir={{ openvpn_path }}
+
+ - name: Generate the Certificate for the Server
+   command: openssl ca -batch -extensions server -in server.csr -out server.crt -config openssl-server-certificate.cnf creates=server.crt
+            chdir={{ openvpn_path }}
+
+ - name: Generate CSRs for the clients
+   command: >
+     openssl req -new -key {{ item }}.key -out {{ item }}.csr -subj "{{ openssl_request_subject }}/CN={{ item }}" creates={{ item }}.csr
+            chdir={{ openvpn_path }}/{{ item }}
+   with_items: 
+     openvpn_clients
+
+ - name: Generate certificates for the clients
+   command: >
+     openssl x509 -CA {{ openvpn_ca }}.crt -CAkey {{ openvpn_ca }}.key -CAcreateserial -req -days {{ openvpn_days_valid }} -in {{ item }}.csr -out {{ item }}.crt 
+     creates={{ item }}.crt
+            chdir={{ openvpn_path }}/{{ item }}
+   with_items: 
+     openvpn_clients
+           
+ - name: Generate the HMAC firewall key
+   command: openvpn --genkey --secret {{ openvpn_hmac_firewall }} creates={{ openvpn_hmac_firewall }}
+
+ - name: Register CA certificate contents
+   command: cat ca.crt chdir={{ openvpn_path }}
+   register: openvpn_ca_contents
+
+ - name: Register client certificate contents
+   command: cat {{ item }}.crt chdir={{ openvpn_path }}/{{ item }}
+   with_items: openvpn_clients
+   register: openvpn_client_certificates
+
+ - name: Register client key contents
+   command: cat {{ item }}.key chdir={{ openvpn_path }}/{{ item }}
+   with_items: openvpn_clients
+   register: openvpn_client_keys
+
+ - name: Register HMAC firewall contents
+   command: cat ta.key chdir={{ openvpn_path }}
+   register: openvpn_hmac_firewall_contents
+
+ - name: Create the client configs
+   no_log: True
+   template: src=client.cnf.j2 dest={{ openvpn_path }}/{{ item[0] }}/{{ openvpn_server }}.ovpn
+   with_together:
+     - openvpn_clients
+     - openvpn_client_certificates.results
+     - openvpn_client_keys.results
+
+ - name: Generate Diffie-Hellman parameters (this will take a while)
+   command: openssl dhparam -out {{ openvpn_dhparam }} {{ openvpn_key_size }}
+            creates={{ openvpn_dhparam }}
+
+ - name: Show the iptables rules
+   shell: iptables -n -t nat -L
+   register: iptables_nat_rules
+   always_run: yes
+
+ - name: Allow OpenVPN through the firewall
+   command: "{{ item }}"
+   with_items:
+     - /sbin/iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+     - /sbin/iptables -A FORWARD -s {{ openvpn_network }}/24 -j ACCEPT
+     - /sbin/iptables -A FORWARD -j REJECT
+     - /sbin/iptables -t nat -A POSTROUTING -s {{ openvpn_network }}/24 -o {{ ansible_default_ipv4.interface }} -j MASQUERADE
+   when: iptables_nat_rules.stdout.find("MASQUERADE") == -1
+   register: iptables_nat_rule_added
+
+ - name: Save NAT iptables rules
+   command: service iptables-persistent save
+   when: iptables_nat_rule_added.changed
+
+ - name: Allow OpenVPN through ufw
+   ufw: rule=allow port={{ openvpn_port }} proto={{ openvpn_protocol }}
+
+ - name: Copy OpenVPN configuration file into place
+   template: src=etc_openvpn_server.conf.j2 dest=/etc/openvpn/server.conf
+   notify:
+     - Restart Openvpn
+
+ # OpenVPN must restart first so the 10.8.0.0 interface is available to dnsmasq
+ - meta: flush_handlers
+
+ - name: Copy dnsmasq configuration file into place
+   template: src=etc_dnsmasq.conf.j2 dest=/etc/dnsmasq.conf backup=yes
+   notify: 
+     - Restart DnsMasq
+
+ - name: Update the "rc.local" file
+   lineinfile: dest=/etc/rc.local regexp="/etc/init.d/dnsmasq restart" line="/etc/init.d/dnsmasq restart" insertbefore="exit 0" backup=yes state=present
+
+ - name: Retrieve the files that clients will need in order to connect to the OpenVPN server
+   no_log: True
+   fetch: src={{ openvpn_path }}/{{ item[0] }}/{{ item[1] }} dest=clients/{{ item[0] }}.ovpn flat=yes
+   with_nested:
+     - openvpn_clients
+     - ["{{ openvpn_server }}.ovpn"]
+
+ - pause: seconds=5
+          prompt="You are ready to set up your OpenVPN clients. The files that you need are in the same directory under "clients" directory from where you run the playbook. Press any key to continue..."

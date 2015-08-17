@@ -1,0 +1,6 @@
+---
+ - hosts: openvpn
+   sudo: True
+   gather_facts: True
+   roles:
+     - openvpn
