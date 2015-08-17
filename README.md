@@ -54,4 +54,4 @@ After editing the vars and hosts file as per requirements, run this command:
 ansible-playbook -i hosts site.yml
 ```
 
-Check it out!]:https://rbgeek.wordpress.com/2015/08/17/install-openvpn-server-using-ansible-over-aws-vpc/
+[Check it out!]:https://rbgeek.wordpress.com/2015/08/17/install-openvpn-server-using-ansible-over-aws-vpc/
