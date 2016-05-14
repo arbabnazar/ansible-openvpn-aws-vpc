@@ -111,7 +111,7 @@
      - openvpn_client_keys.results
 
  - name: Generate Diffie-Hellman parameters (this will take a while)
-   command: openssl dhparam -out {{ openvpn_dhparam }} {{ openvpn_key_size }}
+   command: openssl dhparam -out {{ openvpn_dhparam }} {{ openvpn_key_size }} -dsaparam
             creates={{ openvpn_dhparam }}
 
  - name: Show the iptables rules
